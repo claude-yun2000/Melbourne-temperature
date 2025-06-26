@@ -1,0 +1,431 @@
+---
+title: 'Daily Temperatures in Melbourne: time series analysis and forecast'
+author: "Q Yun"
+output:
+  pdf_document: default
+  fig_caption: yes
+  word_document: default
+  html_document:
+    df_print: paged
+date: "2025-05-11"
+fontsize: 11pt
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## 1. Introduction
+
+Analysing weather data and making reasonably accurate predictions can not only bring huge practical benefits for human economic activities, but also help us to understand the long-term climate change pattern. Auto Regression Integrated Moving Average (ARIMA) has been widely used in projects on weather data modelling (eg. Dahiya, 2024), and is also to be used in this project. The dataset in the project contains the daily maximum temperatures (degrees Celsius) in Melbourne of Australia over a period of 10 years (1981 and 1990). R will be the tool used in the analysis and modelling of data in this project.
+
+There are a couple of objectives in this project: 
+
++ evaluate the possible long-term trend of the temperature in Melbourne; 
++ understand the seasonality; 
++ apply an appropriate time series model based on our understanding of the trend and seasonality;
++ forecast the temperatures and check the model performance against a test set.
+
+```{r loading, echo=FALSE, results='hide'}
+library(readxl)
+excel_data  <- read_excel("TempMelb.xls", range = "A12:B3662") #may need to change to the file path containing the data
+names(excel_data)[2] <- "DailyMax"
+head(excel_data)
+anyNA(excel_data)
+```
+```{r, include=FALSE}
+# Convert the 'Date' column to Date format
+excel_data$Date <- as.Date(excel_data$Date, format = "%Y-%m-%d")
+
+# Determine the start date and frequency
+start_date <- min(excel_data$Date)  # Get the first date in your data
+# Assuming daily frequency, adjust if different
+frequency <- 365
+class(excel_data$Date)
+```
+
+## 2. Data exploration
+Although we are going to use the ARIMA approach for the dataset, it is still essential to carry out data exploration in order to identify the shape, patterns or possible outliers of the data. An examination of the dataset confirms that it does not contain any missing data, which simplies our analysis. 
+
+After plotting a histogram of the daily maximum temperatures, it can be seen that there is only one mode in the data. The distribution of the data roughly resembles a bell shape, although with a significant skewness to the right. A box plot of the temperatures reveals quite a few possibly outliers of unusually high temperature, which is inline with the right-skewed distribution.
+```{r}
+par(mfrow = c(1, 2))
+# Histogram
+hist(excel_data$DailyMax, main = "Histogram of Daily Maximum",
+     xlab = "Daily Maximum Temperature (°C)", col = "skyblue", border = "black")
+
+# Box plot
+boxplot(excel_data$DailyMax, main = "Boxplot of Daily Maximum",
+        ylab = "Daily Maximum Temperature (°C)", col = "lightgreen", border = "brown")
+```
+The summary statistics of the maximum temperatures over the 10 years are as follows, 
+
+```{r}
+library(knitr)
+
+summary_data <- summary(excel_data$DailyMax) 
+summary_data <- as.data.frame(as.list(summary_data))
+
+# Create a table using kable()
+summary_data <- t(summary_data)
+kable(summary_data, col.names = "Summary Statistics")
+```
+
+In order to manipulate the data more effectively, it is also essential to transform the date information in our dataset to the Date format in R. After the transformation of data format, a time series of the daily maximum temperature over the 10-year period is plotted. In order to reduce the noise of daily data, a 11-day moving average of the daily maximum temperature is superimposed onto the plot for a better understanding of the trend.
+
+```{r, include = FALSE, results='hide'}
+# Create the ts object
+start_date <- min(excel_data$Date) 
+frequncy <- 365
+temp_ts <- ts(excel_data$DailyMax,
+              start = c(as.numeric(format(start_date, "%Y")),
+                        as.numeric(format(start_date, "%j"))), # Year and day of year
+              frequency = frequency)
+# Print the ts object to see its structure
+print(temp_ts)
+```
+```{r}
+# Plot the time series
+# Calculate the 11-day moving average
+moving_average <- stats::filter(temp_ts, rep(1/11, 11), sides = 2)
+
+# Plot the original time series and the moving average
+plot(temp_ts, main = "Daily Maximum Temperature with 11-Day Moving Average",
+     ylab = "Daily Maximum Temperature (°C)", xlab = "Time")
+lines(moving_average, col = "purple", lwd = 2)
+legend("topright", legend = c("Original Data", "11-Day Moving Average"),
+       col = c("black", "purple"), lty = 1, lwd = c(1, 2))
+```
+It can be seen clearly from the above plot that there is a typical periodic cycle in our data, which is understandable due to the annual pattern of our weather. Fortunately, there doesn't seem to be any obvious increasing or decreasing trend. However, if we look at the 11-day moving average, the troughs of lowest temperatures stay rather stable, while there seem to be a small wave for the peaks over the period. This may suggest a cyclical pattern for the high temperatures in the summer, which means a couple of consecutive hot summers may be followed by a couple slightly mild summers. This wave is not very significant, therefore we may choose to leave it if our ARIMA model works fine.
+
+There may also be patterns for the temperatures in different months. Therefore we aggregate the temperatures fro each month over the 10-year period, and produce box plots for different months. It reveals that the range and variability of the temperatures in the winter months (June and July in particular) are much smaller, while those in the summer (January and February in particular) are much larger, which indicates that extreme temperatures often happens in the summer.
+```{r}
+library(ggplot2)
+# Extract month and year
+excel_data$Month <- as.numeric(format(excel_data$Date, "%m"))
+excel_data$Year <- as.numeric(format(excel_data$Date, "%Y"))
+
+# Create the box plot using ggplot2
+ggplot(excel_data, aes(x = factor(Month), y = DailyMax, group = factor(Month))) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  labs(title = "Monthly Boxplots of Daily Maximum Temperature",
+       x = "Month",
+       y = "Daily Maximum Temperature (°C)") +
+  theme_bw() # Optional: Use a black and white theme
+```
+
+## 3. Model fitting
+### 3.1 Data transformation and exploration of monthly data
+Since initial data exploration has revealed a yearly cycle of the daily maximum temperatures and no specific short-term patterns for the daily temperature is identified, it is appropriate to aggregate the daily maximum temperatures into monthly mean temperatures. As we are more interested in long-term patterns rather than the change of daily temperatures, this aggregation will help to reduce the impact of the outliers and the noise of daily temperatures, hence facilitate our analysis of the seasonality.
+
+```{r, results='hide'}
+# Calculate monthly mean temperature
+monthly_mean_temp <- aggregate(DailyMax ~ Month + Year, data = excel_data, FUN = mean)
+
+# Print the resulting data frame
+print(monthly_mean_temp)
+```
+```{r}
+top_10_monthly <- head(monthly_mean_temp, 10)
+
+# Rename the third column
+names(top_10_monthly)[3] <- "Monthly mean maximum (°C)"
+
+# Create the table with the specified title
+kable(top_10_monthly, caption = "Monthly mean maximum (first 10 months)")
+```
+Although it is common knowledge that temperatures usually follow an annual pattern, the monthly temperatures are averaged over the 10-year period and then plotted. No quarterly or semi-annual pattern is found in the following plot.
+
+```{r}
+monthly_mean_temp_10yr <- aggregate(DailyMax ~ Month, data = monthly_mean_temp, FUN = mean)
+
+# Create the plot
+ggplot(monthly_mean_temp_10yr, aes(x = factor(Month), y = DailyMax)) +
+  geom_line(group = 1) +  # Connect the points with lines for better visualization
+  geom_point() +
+  labs(title = "Monthly Mean Temperature (Averaged Over 10 Years)",
+       x = "Month",  # Label the x-axis as "Month"
+       y = "Mean Monthly Temperature (°C)") +
+  theme_bw()
+```
+The monthly mean temperatures are then plotted over the whole 10-year period. With less data points than the daily temperatures, the monthly data displays a clearer annual cycle.
+```{r}
+monthly_temp_ts <- ts(monthly_mean_temp$DailyMax, frequency = 12, start = c(min(monthly_mean_temp$Year), 1))
+
+# Plot the time series
+plot(monthly_temp_ts, main = "Monthly Mean Temperature Time Series",
+     ylab = "Mean Monthly Temperature (°C)", xlab = "Time")
+```
+The monthly data is then decomposed by applying the decompose function (with the additive model). After the docomposition, it can be seen that the seasonals in the plot appear to be rather constant and persistent. In addition, it also becomes more evident that there is a waving trend with a small range of about 1.5°C, which seems to confirm our earlier observation in the data exploration. 
+```{r}
+decompose_result <- decompose(monthly_temp_ts, type = "additive")
+
+# Plot the decomposition
+plot(decompose_result)
+```
+The ACF plots has also confirmed the strong auto-correlations in the data, and the strong seasonality also features prominently in the ACF plot.
+
+```{r}
+# ACF and PACF plots
+# par(mfrow = c(1, 2))  # Set up a 1x2 plot layout
+acf(monthly_temp_ts, main = "ACF of Monthly Mean Temperature (100 lags)", lag = 100)
+```
+
+### 3.2 Training set and its data exploration
+In order to assess the performance of our ARIMA model, the 120 data points in the monthly mean data are split into a training and a test set. The training set consists of the data points during the first nine years (the first 108), and the test set includes the last 12 data points for the most recent year of 1990.
+```{r, include = FALSE}
+training_data <- monthly_mean_temp[1:108, ]
+test_data <- monthly_mean_temp[109:nrow(monthly_mean_temp), ]
+nrow(training_data)
+nrow(test_data)
+length(training_data)
+length(test_data)
+print(training_data)
+print(test_data)
+```
+After the split of the datasets, we would like to double check if the pattern in the training set remains unchanged, and this can be confirmed in the following time series plot of the training data.
+```{r}
+# Convert training_data to a time series object
+training_ts <- ts(training_data$DailyMax, frequency = 12, start = c(min(training_data$Year),1))
+
+# Plot the time series
+plot(training_ts, main = "Training Data Time Series",
+     ylab = "Mean Monthly Temperature (°C)", xlab = "Time")
+```
+
+Due to the strong seasonality and a small wave trend present in the data, a seasonal difference with a lag of 12 is probably the first essential step to achieve stationarity. The seasonally differenced training data is then plotted, and it can be seen that the strong seasonality has disappeared.
+
+```{r}
+# Differencing the training time series with a lag of 12
+diff_training_ts <- diff(training_ts, lag = 12)
+
+# Plot the differenced time series
+plot(diff_training_ts, main = "Differenced Training Data Time Series (Lag 12)",
+     ylab = "Differenced Monthly Maximum Temperature (°C)", xlab = "Time")
+```
+
+However, we still need to examine the ACF and PACF of the seasonally differenced data to check the auto-correlations. 
+
+```{r}
+# ACF and PACF plots for the differenced training time series
+par(mfrow = c(2, 1))  # Set up a 1x2 plot layout
+acf(diff_training_ts, main = "ACF of Differenced Training Data")
+pacf(diff_training_ts, main = "PACF of Differenced Training Data")
+```
+```{r, results='hide'}
+Box.test(diff_training_ts, lag = 24, type = "Ljung-Box")
+```
+As can be seen from the above two plots, the seasonality has largely been removed. However, there are still two spikes around a full cycle of 12 lags in both plots, and there still appear to be slight seasonality in the PACF plot. A Box-Ljung test with extremely small p-value also indicates the auto-correlations still exist in the seasonally differenced data. A further round of seasonal difference might be an option. However, it turns out that twice seasonal difference does seems to be worse off, particularly in the PACF plots.
+
+```{r}
+diff2_training_ts <- diff(diff_training_ts, lag = 12) 
+par(mfrow = c(1, 2))  # Set up a 1x2 plot layout
+acf(diff2_training_ts, main = "ACF of Twice Differenced Data")
+pacf(diff2_training_ts, main = "PACF of Twice Differenced Data")
+```
+A first difference after the seasonal difference may be the other option. However, it can be seen from the following ACF and PACF plots that this option doesn't work either, although the remaining seasonality in the PACF seems to become weaker.
+
+```{r, }
+# First differencing
+first_diff <- diff(diff_training_ts, lag = 1)
+
+# ACF and PACF plots
+# par(mfrow=c(2,1))
+acf(first_diff, main = "ACF of First Difference of the Seasonally Differenced Data")
+pacf(first_diff, main = "PACF of First Difference of the Seasonally Differenced Data")
+```
+There is a spike at a lag of one month in the above ACF plot, which may suggest an MA(1) term for the differenced data, while the spikes up to a lag of 2 months in the PACF plot may suggests a AR(2) terms. The Extended Autocorrelation Function (EACF) is also helpful in identifying the orders of MA and AR terms. The rows in the EACF represent the AR term and the columns represent MA terms. By looking at the EACF result, it appears that a AR(1) term and an MA(1) or MA(2) might be appropriate. However, by taking into account the principle of parsimony, we will mainly consider an ARIMA model consisting of AR(1) and MA(1) terms.
+
+```{r, echo=FALSE, message=FALSE}
+library(TSA)
+eacf_result <- TSA::eacf(training_ts)
+
+# Create a table using kable()
+kable(eacf_result$acf, caption = "EACF Values for Temperature Time Series")
+```
+
+We further investigate the two spikes near the 12-month lag in the above plots for the seasonal and then first differenced data. We change the confidence interval type to be 'ma (moving average)' for the ACF plot and also plot the PACF up to a lag of 36 months.
+
+```{r}
+par(mfrow = c(2, 1))
+acf(as.vector(first_diff),lag.max=36,ci.type='ma', main = 'ACF of the first and seasonal differences with a lag up to 36 months')
+pacf(as.vector(first_diff),lag.max=36,ci.type='ma', main = 'PACF of the first and seasonal differences with a lag up to 36 months')
+```
+It can be seen that the auto-correlations disappears after lags further than 12 months. Therefore we may consider the two spikes to be the result of chance.
+
+### SARIMA models
+We first apply a $SARIMA(1, 1, 1) \times (0, 1, 1)_{12}$ model to the training set, and plot the time series of the residuals of this model.
+
+```{r, results='hide'}
+sarima_model1 <- arima(training_ts, order = c(1, 1, 1), seasonal = list(order = c(0, 1, 1), period = 12))
+print(sarima_model1)
+```
+
+```{r}
+# Extract residuals from the SARIMA model
+residuals <- sarima_model1$residuals
+
+# Plot the residuals
+plot(residuals, type = "l", main = "Residuals of SARIMA Model",
+     ylab = "Residuals", xlab = "Time")
+abline(h = 0, col = "red") # Add a horizontal line at 0 for reference
+```
+We then plot the ACF and PACF of the residuals after fitting the model. It can be seen from the following plots that the there is no strong correlations among the residuals. The Ljung-Box test reports a p-value of 0.3826, which suggests a white noise process for the residuals.
+
+```{r}
+# ACF and PACF plots of the residuals
+par(mfrow = c(1, 2))  # Set up a 1x2 plot layout
+acf(residuals, main = "ACF of Residuals")
+pacf(residuals, main = "PACF of Residuals")
+```
+```{r, results='hide'}
+# Box test on the residuals
+Box.test(residuals, lag = 24, type = "Ljung-Box")
+```
+The normality of the residuals is also checked by the QQ-plot and the Shapiro-Wilk normality test, and it seems the distribution of the residuals deviates slightly from a normal distribution.
+
+```{r}
+# Create QQ plot with qqline for sarima_model5 residuals
+qqnorm(sarima_model1$residuals)
+qqline(sarima_model1$residuals)
+```
+```{r, results='hide'}
+shapiro.test(sarima_model1$residuals)
+```
+Although this model appears to be a possible option, we would like to compare a few more models with different parameters. Since it seems that another first difference doesn't appear to help much with the model, by taking into account the principle of parsimony, we will only consider the seasonal difference of the data and set the p, q, P, Q parameters to be between 0 and 1. Therefore, different combinations of parameters are applied to the model of $SARIMA(p, 0, q) \times (P, 1, Q)_{12}$.
+
+```{r}
+results_df <- data.frame(p = numeric(0), q = numeric(0), P = numeric(0), Q = numeric(0), AIC = numeric(0), SSE = numeric(0), p_value = numeric(0))
+
+for (p in 0:1) {
+  for (q in 0:1) {
+    for (P in 0:1) {
+      for (Q in 0:1) {
+        # Fit the SARIMA model
+        model <- tryCatch({
+          arima(training_ts, order = c(p, 0, q), seasonal = list(order = c(P, 1, Q), period = 12))
+        }, error = function(e) {
+          return(NULL) # Return NULL if model fitting fails
+        })
+
+        if (!is.null(model)) {
+          # Calculate AIC, SSE, and p-value
+          aic_val <- AIC(model)
+          sse_val <- sum(model$residuals^2) # Sum of squared errors
+
+          # Perform Ljung-Box test
+          lb_test <- Box.test(model$residuals, lag = 12, type = "Ljung-Box")
+          p_val <- lb_test$p.value
+
+          # Add the results to the data frame
+          results_df <- rbind(results_df, data.frame(p = p, q = q, P = P, Q = Q, AIC = aic_val, SSE = sse_val, p_value = p_val))
+        }
+      }
+    }
+  }
+}
+
+# Print the results table
+library(knitr)  
+kable(results_df)
+```
+
+According to the above results, the model with p=1, q=1, P=0, Q=1 has the lowest AIC value, the lowest SSE. and the highest p-value in the Ljung-Box test, therefore we will choose $SARIMA(1, 0, 1) \times (0, 1, 1)_{12}$ to be the model. We then fit this model to the training data and find the coeffients.
+
+```{r}
+# Fit the SARIMA(1, 0, 1) x (0, 1, 1)12 model
+fit_model <- arima(training_ts, order = c(1, 0, 1), seasonal = list(order = c(0, 1, 1), period = 12))
+
+# Print the model summary
+model_output <- capture.output(print(fit_model))
+library(knitr)
+kable(model_output, format = "markdown")
+```
+We then carry out the diagnosis of the residuals.
+
+```{r}
+tsdiag(fit_model)
+```
+From the above plots, the distribution of standardised residuals appears to be random. The ACF plot also indicates that there is no significant correlations among the residuals, and the Ljung-Box statstics for different lags stay beyond the 0.05 significance line, further supporting the randomness of residuals.
+
+```{r}
+# Create QQ plot with qqline for fit_model residuals
+qqnorm(fit_model$residuals)
+qqline(fit_model$residuals)
+```
+```{r, results='hide'}
+# Shapiro-Wilk test for normality
+shapiro.test(fit_model$residuals)
+```
+
+Normality test of the residuals for this chosen model is also carried out through the QQ-plot and the Shapiro-Wilk test. The plot and a p_value of 0.04296 in the Shapiro-Wilk test suggest that the residuals of our chose model still deviates slightly from a normal distribution. The mean of the residuals (-0.088) is not very close to 0. We may just accept this to be a limitation of the model, since the small waving pattern identified in our earlier data exploration is not accounted for in this model.
+
+```{r, results='hide'}
+m_res <- mean(fit_model$residuals)
+print(paste("The mean of the residuals is: ", m_res))
+```
+
+In the $SARIMA(1, 0, 1) \times (0, 1, 1)_{12}$ model adopted for the training set, there are:
+
++ non-seasonal AR(1) and MA(1) items;
++ a seasonal SMA(1) term and a seasonal difference term of $(1 - B^{12})$ (D = 1);
+
+Therefore, the formula integrating the estimated coefficients for the model is
+$(1 - 0.9595B)(1 - B^{12})Y_t = (1 - 0.8692B)(1 - 0.9998B^{12})\epsilon_t$, which can be further expanded to find the formula for $Y_t$. 
+
+## Forcast
+Based on the chosen model, we now plot a forcast for the 12-steps ahead together with the lower and upper bounds of the 95% confidence interval.
+
+```{r, echo=FALSE,}
+predictions <- predict(fit_model, n.ahead = 12)
+
+# Extract predicted values and standard errors
+predicted_values <- predictions$pred
+standard_errors <- predictions$se
+
+# Calculate upper and lower bounds for confidence intervals
+upper_bound <- predicted_values + 1.96 * standard_errors
+lower_bound <- predicted_values - 1.96 * standard_errors
+
+# Create a time series object for the predicted values
+predicted_ts <- ts(predicted_values, start = end(training_ts) + c(0, 1), frequency = frequency(training_ts))
+
+# Plot the predicted values with confidence intervals
+plot(predicted_ts, main = "12-Month Ahead Temperature Forecast", ylab = "Temperature (°C)", xlab = "Time", lty = 3)
+lines(ts(upper_bound, start = end(training_ts) + c(0, 1), frequency = frequency(training_ts)), col = "blue", lty = 2)
+lines(ts(lower_bound, start = end(training_ts) + c(0, 1), frequency = frequency(training_ts)), col = "blue", lty = 2)
+
+legend(x = "top", legend = c("Point Forecasts", "95% CI"), col = c("black", "blue"), lty = c(1, 2))
+```
+To evaluate the predictions better, we zoom into the 12 month steps forcast, and check if the test data fits well between the confidence interval of the predictions.
+
+```{r, echo = FALSE}
+predict=predict(fit_model,n.ahead=12) # remove newxreg argument
+
+# Assuming your test data 'test' starts at index 109 and has 12 months
+# Extract the relevant indices (109 to 120) from the original data's index
+predicted_months <- seq(109, 120)
+
+# Plot only the predicted months
+plot(predicted_months, predict$pred, type='l', col='red',
+     xlab="Month Index", ylab="Predicted Temperature (°C)",
+     main="Predicted Temperatures (12 Months)")
+
+# Add confidence intervals
+lines(predicted_months, predict$pred - 1.98 * predict$se, col='red', pch=22, lty=2)
+lines(predicted_months, predict$pred + 1.98 * predict$se, col='red', pch=22, lty=2)
+
+# Add the actual data from the test dataset
+# Extract the 'DailyMax' column from test_data to match the length of predicted_months
+lines(predicted_months, test_data$DailyMax[1:length(predicted_months)], type='l', col='blue')  
+
+legend(x = "top", legend=c("Prediction", "95% CI", "Real Data"),
+       col=c("red", "red", "blue"), lty=c(1, 2, 1))
+```
+As shown in the above graph, the real test data (the blue line) lies perfectly in the 95% confidence interval (two dotted red lines) of the model. Hence the chosen model works well for the test data, and this good performance also helps to justify our decision to treat the residuals of the model as roughly normal.
+
+## Conclusion
+The exploration of the daily maximum temperatures in Melbourne clearly demonstrates a yearly cycle, and didn't identify any obvious long-term trend. In order to facilitate the analysis as well as reduce the noise, the daily temperatures were aggregated into monthly mean temperatures. Only a seasonal difference of the data is necessary for the monthly data. By comparing a few SARIMA models with different p, q and P, Q parameters, it has been concluded that a $SARIMA(1, 0, 1) \times (0, 1, 1)_{12}$ model works the best for the training set, and it also predicts well on the test set. There is a limitation to the chosen model though. The slight waving trend in the data was not taken into account, and the residuals of the model deviates slightly from a normal distribution. Incorporating a sine or cosine component into the model may help overcome this limitation and is worth further exploration. 
+
+## References
+Dahiya, P., Kumar, M., Manhas, S. et al. (2024). Time series study of climate variables utilising a seasonal ARIMA technique for the Indian states of Punjab and Haryana. Discover Applied Sciences, 6(650). https://doi.org/10.1007/s42452-024-06380-5
